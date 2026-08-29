@@ -1,0 +1,24 @@
+#!/bin/bash
+#PBS -N phase0_env
+#PBS -q debug-g
+#PBS -W group_list=gd43
+#PBS -l select=1
+#PBS -l walltime=00:20:00
+#PBS -o logs/phase0_env.out
+#PBS -j oe
+#PBS -V
+
+set -x
+cd "${PBS_O_WORKDIR:-$PWD}"
+echo "host=$(hostname) date=$(date)"
+echo "--- nvidia-smi ---"
+nvidia-smi || echo "nvidia-smi NOT FOUND"
+echo "--- nproc / mem ---"
+nproc; free -g | head -2
+echo "--- python ---"
+.venv/bin/python -V
+export TGGATES_PATCH_DIR=/work/gd43/share/tggates/sample_patch_agg
+[ -f .env ] && set -a && . ./.env && set +a
+echo "--- running check ---"
+.venv/bin/python -u scripts/check_env_gpu.py
+echo "--- exit=$? ---"

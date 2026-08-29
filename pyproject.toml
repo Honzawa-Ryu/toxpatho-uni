@@ -1,60 +1,46 @@
 [project]
-name = "template-daily-research-experiments"
+name = "toxpatho-uni"
 version = "0.1.0"
-description = "Knowledge graph construction and retrieval with PubMed"
+description = "Domain adaptation of pathology foundation models (UNI / UNI2) to toxicologic pathology"
 readme = "README.md"
 requires-python = "==3.12.*"
 dependencies = [
-    "jupyterlab",
-    "ipython",
-    "matplotlib",
-    "notebook",
+    # --- core numerics / data ---
     "numpy",
-    "optuna",
     "pandas",
-    "dask",
-    "fastparquet",
-    "lightgbm",
-    "plotly",
     "polars",
-    "elasticsearch>=8.0.0,<9.0.0",
     "pyarrow",
-    "tqdm",
-    "requests",
-    "scikit-learn",
     "scipy",
-    "seaborn",
-
-    "slackweb",
-    "wandb",
-    "xgboost",
+    "scikit-learn",
+    "h5py",
+    # --- deep learning ---
     "torch==2.11.0+cu130",
     "torchvision",
-    "torchaudio",
-    "transformers",
-    "datasets",
-    "lxml",
-    "python-dotenv",
-    "cython",
-    "spacy",
-    "fast-langdetect",
-    "scispacy",
-    "duckdb",
-    "pynvml",
-    "psutil",
+    "timm",                 # UNI / UNI2 の ViT 実装
+    "einops",
+    "peft",                 # LoRA
     "accelerate",
-    "trl",
-    "peft",
-    "evaluate",
-    "bitsandbytes",
     "safetensors",
-    "tokenizers",
     "huggingface-hub",
-    "sentencepiece",
-    "vllm>=0.22.0",
-    "matplotlib-venn>=1.1.2",
+    "transformers",
+    # --- imaging ---
+    "pillow",
+    "opencv-python-headless",
+    # --- experiment tracking / viz ---
+    "wandb",
+    "tqdm",
+    "matplotlib",
+    "seaborn",
+    "plotly",
+    # --- notebooks / misc ---
+    "jupyterlab",
+    "ipython",
+    "notebook",
+    "python-dotenv",
+    "psutil",
+    "pynvml",
+    "slackweb",
 ]
-
 
 [build-system]
 requires = ["hatchling"]
@@ -74,4 +60,3 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-cu130" }
 torchvision = { index = "pytorch-cu130" }
-torchaudio = { index = "pytorch-cu130" }
