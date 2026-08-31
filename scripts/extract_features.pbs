@@ -1,0 +1,51 @@
+#!/bin/bash
+# 凍結エンコーダで TG-GATEs 全スライドの特徴を抽出する。
+#
+#   qsub -v ENCODER=uni    scripts/extract_features.pbs
+#   qsub -v ENCODER=uni2h  scripts/extract_features.pbs
+#   qsub -v ENCODER=vit_imagenet scripts/extract_features.pbs
+#
+# スモークテスト（数十スライドだけ、debug-g で数分）:
+#   qsub -v ENCODER=uni,LIMIT=20 -q debug-g -l walltime=00:20:00 scripts/extract_features.pbs
+#
+# 実測(Phase 0): UNI ~3,000 img/s → 全 11,177 スライドで約 35 分、
+#                UNI2-h ~1,200 img/s → 約 85 分。walltime は余裕を見て 3 時間。
+# 中断しても done フラグから再開できるので、投げ直すだけでよい。
+#
+# VRAM 見積もり（重みは fp32 のまま autocast bf16 で走らせた場合の概算）:
+#   sub_batch |   UNI  | UNI2-h
+#        64   | ~2.8G  | ~5.4G
+#       128   | ~3.0G  | ~6.1G
+#       256   | ~3.5G  | ~7.6G   ← 既定
+#       512   | ~4.6G  | ~10.7G
+# 16 GB の GPU なら既定のままで両モデルとも通る。12 GB 以下なら SUB_BATCH=64、
+# それでも足りなければ extract_features.py の model.cuda() を .to(torch.bfloat16)
+# にすると重み分（UNI 0.6G / UNI2-h 1.4G）が浮く。実測値はログの "VRAM peak" 行。
+#
+#PBS -N extract_feat
+#PBS -q regular-g
+#PBS -W group_list=gd43
+#PBS -l select=1
+#PBS -l walltime=03:00:00
+#PBS -o logs/extract_feat.out
+#PBS -j oe
+#PBS -V
+
+set -eux
+cd "${PBS_O_WORKDIR:-$PWD}"
+mkdir -p logs outputs/features
+
+: "${ENCODER:?ENCODER を -v で渡すこと (uni | uni2h | vit_imagenet)}"
+
+# HF_TOKEN は ~/.bashrc に置いてある。.env があればそちらも読む。
+[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc" || true
+[ -f .env ] && set -a && . ./.env && set +a || true
+
+echo "host=$(hostname) date=$(date) encoder=$ENCODER"
+nvidia-smi || true
+
+.venv/bin/python -u scripts/extract_features.py \
+  --encoder "$ENCODER" \
+  ${LIMIT:+--limit "$LIMIT"} \
+  --workers "${WORKERS:-8}" \
+  --sub-batch "${SUB_BATCH:-256}"
