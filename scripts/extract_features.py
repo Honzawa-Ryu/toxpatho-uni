@@ -148,7 +148,18 @@ def main() -> None:
 
         done = h5["done"][:]
         todo = [i for i in range(n) if not done[i]]
-        print(f"resume: {n - len(todo)} done, {len(todo)} to go", flush=True)
+
+        # 共有ディレクトリの一部が -rw------- で読めない（提供元の設定漏れ、7件）。
+        # 落とさずスキップする。h5 の行は残したまま done=False のままにするので、
+        # 後で権限が直れば投げ直すだけで埋まる。下流は done をマスクとして使うこと。
+        unreadable = [i for i in todo if not os.access(paths[i], os.R_OK)]
+        if unreadable:
+            todo = [i for i in todo if i not in set(unreadable)]
+            print(f"skip {len(unreadable)} unreadable slides: "
+                  f"{[rows[i]['slide_id'] for i in unreadable]}", flush=True)
+
+        print(f"resume: {n - len(todo) - len(unreadable)} done, {len(todo)} to go, "
+              f"{len(unreadable)} skipped", flush=True)
         if not todo:
             return
 
