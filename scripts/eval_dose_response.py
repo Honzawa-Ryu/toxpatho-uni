@@ -33,6 +33,7 @@ import pandas as pd
 from scipy.stats import spearmanr
 from sklearn.covariance import LedoitWolf
 from sklearn.decomposition import PCA
+from sklearn.metrics import roc_auc_score
 
 DOSE_ORDER = ["Control", "Low", "Middle", "High"]
 
@@ -61,9 +62,16 @@ def main() -> None:
     ap.add_argument("--cov-mode", choices=["within", "pooled"], default="within")
     ap.add_argument("--timepoint", choices=["per", "pooled"], default="per",
                     help="per=時点ごとに単調性を見る（既定） / pooled=時点を混ぜる")
+    ap.add_argument("--axis", choices=["dose", "grade"], default="dose",
+                    help="単調性を見る軸。dose=用量水準(効果の代理) / "
+                         "grade=病理医が付けた重症度(効果そのもの)")
     ap.add_argument("--min-doses", type=int, default=3,
                     help="Spearman を計算するのに必要な用量水準数")
+    ap.add_argument("--permute", type=int, default=0,
+                    help="帰無分布: 群内で用量ラベルをシャッフルして ρ を再計算する回数")
     ap.add_argument("--out-dir", default="outputs/eval")
+    ap.add_argument("--dump-scores", metavar="PATH",
+                    help="スライド単位の距離を CSV に出す（所見タイプ別の解析用）")
     args = ap.parse_args()
 
     manifest = pd.read_csv(args.manifest)
@@ -121,9 +129,24 @@ def main() -> None:
           f"(理論値の目安 √{args.pca_dim} = {np.sqrt(args.pca_dim):.2f})")
 
     # --- 5. 化合物×時点ごとに Spearman ρ ---
+    # 陰性対照は「その化合物が全時点・全用量で一切所見を出さない」で取る。
+    # 群レベル(_grp)の has_finding だと、他の時点で所見を出す化合物が混ざる。
+    cmp_clean = df.groupby("compound")["is_normal"].min().eq(1)
+
+
+    # --- 単調性を見る軸 ---
+    # dose は「効果の代理」でしかない。実際 High 用量の 52.5% は所見なしで、
+    # grade を軸にすると代理を挟まずに「表現が重症度を追えているか」を直接測れる。
+    if args.axis == "dose":
+        df["_axis"] = df["dose_level_idx"]          # 0..3, -1 は欠損
+        AXIS_LAB = ["Control", "Low", "Middle", "High"]
+    else:
+        df["_axis"] = df["max_grade_idx"] + 1       # 0=所見なし, 1=minimal .. 4=severe
+        AXIS_LAB = ["none", "minimal", "slight", "moderate", "severe"]
+
     rows = []
     for g, sub in df[np.isfinite(df["mahalanobis"])].groupby("_grp"):
-        med = sub.groupby("dose_level_idx")["mahalanobis"].median()
+        med = sub.groupby("_axis")["mahalanobis"].median()
         med = med[med.index >= 0].sort_index()
         if len(med) < args.min_doses:
             continue
@@ -132,24 +155,68 @@ def main() -> None:
             compound=g[0], period=g[1] if len(g) > 1 else "all",
             n_slides=len(sub), n_doses=len(med), rho=rho, p=p,
             has_finding=int((sub["is_normal"] == 0).any()),
-            **{f"d_{DOSE_ORDER[i]}": med.get(i, np.nan) for i in range(4)}))
+            compound_clean=int(cmp_clean[g[0]]),
+            **{f"d_{AXIS_LAB[i]}": med.get(i, np.nan) for i in range(len(AXIS_LAB))}))
     res = pd.DataFrame(rows)
 
     out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"dose_response_{encoder}.csv"
+    out = out_dir / f"{args.axis}_response_{encoder}.csv"
     res.to_csv(out, index=False)
 
     # --- 集計 ---
-    print(f"\n=== 用量反応の単調性 [{encoder}] ===")
+    dcol = df["mahalanobis"].values
+    if args.dump_scores:
+        Path(args.dump_scores).parent.mkdir(parents=True, exist_ok=True)
+        df[["slide_id", "mahalanobis"]].rename(columns={"mahalanobis": "score"}).to_csv(
+            args.dump_scores, index=False)
+        print(f"wrote {args.dump_scores}")
+
+    # --- 軸との相関を全スライドでも見る（群ごとの Spearman は水準数が足りない組を
+    #     落とすため、n が小さくなる。プールした値は落とさない）---
+    ok = np.isfinite(dcol) & (df["_axis"].values >= 0)
+    rho_all, p_all = spearmanr(df["_axis"].values[ok], dcol[ok])
+    print(f"\n全スライドでの Spearman ρ({args.axis}, 距離): {rho_all:+.4f} "
+          f"(n={ok.sum():,}, p={p_all:.2e})")
+    y = (df["is_normal"].values == 0)[ok]
+    if y.any() and not y.all():
+        print(f"所見あり/なしの判別 AUROC: {roc_auc_score(y, dcol[ok]):.4f} "
+              f"(陽性 {y.sum():,} / 陰性 {(~y).sum():,})")
+
+    print(f"\n=== 単調性 [{encoder}, axis={args.axis}] ===")
     print(f"評価できた (化合物×時点) の組: {len(res):,}  化合物 {res['compound'].nunique()}")
     for label, sub in [("全体", res),
-                       ("所見あり", res[res["has_finding"] == 1]),
-                       ("所見なし ★陰性対照", res[res["has_finding"] == 0])]:
+                       ("所見あり(この群)", res[res["has_finding"] == 1]),
+                       ("所見なし(この群)", res[res["has_finding"] == 0]),
+                       ("★陰性対照: 全時点で所見なしの化合物", res[res["compound_clean"] == 1])]:
         if len(sub) == 0:
             continue
         print(f"  {label:<18} n={len(sub):>5}  ρ 平均 {sub['rho'].mean():+.3f}  "
               f"中央値 {sub['rho'].median():+.3f}  ρ>0 {(sub['rho'] > 0).mean():.1%}  "
               f"ρ=1 {(sub['rho'] > 0.99).mean():.1%}")
+    if args.permute:
+        # 群内で用量ラベルだけを入れ替える。距離の値は動かさないので、
+        # 「用量と距離の対応」だけを壊した帰無分布になる。
+        rng = np.random.default_rng(0)
+        null = []
+        sub_df = df[np.isfinite(df["mahalanobis"])]
+        groups = [(g, s["dose_level_idx"].values, s["mahalanobis"].values)
+                  for g, s in sub_df.groupby("_grp")]
+        for _ in range(args.permute):
+            rr = []
+            for g, dose, d in groups:
+                perm = rng.permutation(dose)
+                med = pd.Series(d).groupby(perm).median()
+                med = med[med.index >= 0].sort_index()
+                if len(med) >= args.min_doses:
+                    rr.append(spearmanr(med.index.values, med.values)[0])
+            null.append(np.nanmean(rr))
+        null = np.array(null)
+        obs = res["rho"].mean()
+        print(f"\n帰無分布（群内で用量ラベルをシャッフル、{args.permute} 回）:")
+        print(f"  ρ平均 {null.mean():+.4f} ± {null.std():.4f}  "
+              f"[{null.min():+.3f}, {null.max():+.3f}]")
+        print(f"  観測値 {obs:+.3f}  →  p < {max(1 / args.permute, (null >= obs).mean()):.4f}")
+
     print(f"\nwrote {out}")
 
 
