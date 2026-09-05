@@ -5,6 +5,13 @@
 #   qsub -v ENCODER=uni2h  scripts/extract_features.pbs
 #   qsub -v ENCODER=vit_imagenet scripts/extract_features.pbs
 #
+# 本プロジェクト外で学習した DINO(ViT-B/16) を評価する場合は、チェックポイントと
+# 出力名を渡す。同じ学習ランの別 epoch を並べられるように NAME で分けること。
+#   SSL=/work/gd43/d43000/toxpatho-ssl-comparison/outputs/0026_20260901_dino_clipgrad03
+#   qsub -v ENCODER=dino,DINO_CKPT=$SSL/model_ep85.pt,NAME=dino_ep85 scripts/extract_features.pbs
+#   qsub -v ENCODER=dino,DINO_CKPT=$SSL/model_ep45.pt,NAME=dino_ep45 scripts/extract_features.pbs
+# DINO は ViT-B/16 で UNI(ViT-L/16) より軽いので、所要は UNI の 35 分より短いはず。
+#
 # スモークテスト（数十スライドだけ、debug-g で数分）。
 # **必ず OUT_DIR を分けること。** h5 は slide_id の並びを保存するので、間引いた
 # 状態のファイルが残っていると本番実行が整合性チェックで落ちる。
@@ -43,7 +50,11 @@ set -eux
 cd "${PBS_O_WORKDIR:-$PWD}"
 mkdir -p logs outputs/features
 
-: "${ENCODER:?ENCODER を -v で渡すこと (uni | uni2h | vit_imagenet)}"
+: "${ENCODER:?ENCODER を -v で渡すこと (uni | uni2h | vit_imagenet | dino)}"
+if [ "$ENCODER" = "dino" ]; then
+  : "${DINO_CKPT:?ENCODER=dino には DINO_CKPT を -v で渡すこと}"
+  : "${NAME:?ENCODER=dino には NAME を -v で渡すこと (例 dino_ep85)}"
+fi
 
 # HF_TOKEN は ~/.bashrc に置いてある。.env があればそちらも読む。
 # /etc/bashrc が未定義変数を参照するため、読み込む間だけ set -u を外す。
@@ -51,13 +62,18 @@ set +u
 [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc" || true
 [ -f .env ] && set -a && . ./.env && set +a || true
 set -u
-: "${HF_TOKEN:?HF_TOKEN が取れていない。~/.bashrc の export を確認すること}"
+# DINO は手元のチェックポイントを読むだけなので HF は要らない。
+case "$ENCODER" in
+  uni|uni2h) : "${HF_TOKEN:?HF_TOKEN が取れていない。~/.bashrc の export を確認すること}" ;;
+esac
 
 echo "host=$(hostname) date=$(date) encoder=$ENCODER"
 nvidia-smi || true
 
 .venv/bin/python -u scripts/extract_features.py \
   --encoder "$ENCODER" \
+  ${DINO_CKPT:+--dino-ckpt "$DINO_CKPT"} \
+  ${NAME:+--name "$NAME"} \
   ${LIMIT:+--limit "$LIMIT"} \
   --workers "${WORKERS:-8}" \
   --sub-batch "${SUB_BATCH:-256}" \

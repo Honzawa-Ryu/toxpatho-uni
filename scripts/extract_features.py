@@ -67,6 +67,29 @@ def build_vit_imagenet() -> tuple[torch.nn.Module, int]:
     return m, 1024
 
 
+def build_dino(ckpt_path: str) -> tuple[torch.nn.Module, int]:
+    """toxpatho-ssl-comparison 側で事前学習した DINO ViT-B/16。
+
+    保存されているのは `lib/sslmodel/models/dino.py: DINO` の state_dict で、
+    student と teacher の両方が入っている(466キー)。特徴抽出に要るのは
+    `student_backbone.*`(150キー) だけなので、それを剥がして timm の ViT-B/16 に
+    載せる。DINOヘッド(out_dim 65536)と teacher は使わない。
+
+    同じ学習ランの別 epoch を並べたいので、チェックポイントは引数で受ける
+    (--dino-ckpt)。出力名は --name で分けること。
+    """
+    m = timm.create_model("vit_base_patch16_224", img_size=INPUT_HW,
+                          num_classes=0, dynamic_img_size=True)
+    sd = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    prefix = "student_backbone."
+    body = {k[len(prefix):]: v for k, v in sd.items() if k.startswith(prefix)}
+    if not body:
+        raise SystemExit(f"{ckpt_path} に {prefix}* が無い。DINO の state_dict か確認すること "
+                         f"(先頭キー: {list(sd)[:3]})")
+    m.load_state_dict(body, strict=True)
+    return m, 768
+
+
 ENCODERS = {"uni": build_uni, "uni2h": build_uni2h, "vit_imagenet": build_vit_imagenet}
 
 
@@ -102,7 +125,13 @@ def read_manifest(path: Path, limit: int | None) -> list[dict]:
 # --------------------------------------------------------------------------- main
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--encoder", required=True, choices=sorted(ENCODERS))
+    ap.add_argument("--encoder", required=True,
+                    help=f"{' | '.join(sorted(ENCODERS))} | dino (--dino-ckpt が必要)")
+    ap.add_argument("--dino-ckpt", default=None,
+                    help="--encoder dino のときの DINO チェックポイント(.pt)")
+    ap.add_argument("--name", default=None,
+                    help="出力ファイル名/h5 attrs の encoder 名(既定は --encoder)。"
+                         "同じ dino で epoch 違いを並べるときに dino_ep85 等と分ける")
     ap.add_argument("--manifest", default="data/manifest.csv")
     ap.add_argument("--out-dir", default=os.environ.get("FEATURE_DIR", "outputs/features"))
     ap.add_argument("--sub-batch", type=int, default=256,
@@ -116,16 +145,28 @@ def main() -> None:
     if not torch.cuda.is_available():
         raise SystemExit("CUDA が見えない。GPU ノードで実行すること")
 
+    name = args.name or args.encoder
+
     rows = read_manifest(Path(args.manifest), args.limit)
     paths = [r["patch_path"] for r in rows]
-    print(f"encoder={args.encoder}  slides={len(rows)}", flush=True)
+    print(f"encoder={args.encoder} name={name}  slides={len(rows)}", flush=True)
 
-    model, dim = ENCODERS[args.encoder]()
+    if args.encoder == "dino":
+        if not args.dino_ckpt:
+            raise SystemExit("--encoder dino には --dino-ckpt が要る")
+        model, dim = build_dino(args.dino_ckpt)
+    elif args.encoder in ENCODERS:
+        if args.dino_ckpt:
+            raise SystemExit("--dino-ckpt は --encoder dino のときだけ使える")
+        model, dim = ENCODERS[args.encoder]()
+    else:
+        raise SystemExit(f"未知の encoder: {args.encoder} "
+                         f"({' | '.join(sorted(ENCODERS))} | dino)")
     model = model.eval().cuda()
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{args.encoder}.h5"
+    out_path = out_dir / f"{name}.h5"
 
     n = len(rows)
     with h5py.File(out_path, "a") as h5:
@@ -137,8 +178,10 @@ def main() -> None:
             if not args.no_patch_feat:
                 h5.create_dataset("patch_feat", (n, PATCHES_PER_SLIDE, dim),
                                   dtype="float16", chunks=(1, PATCHES_PER_SLIDE, dim))
-            h5.attrs.update(encoder=args.encoder, dim=dim, input_hw=INPUT_HW,
+            h5.attrs.update(encoder=name, dim=dim, input_hw=INPUT_HW,
                             preprocess="bicubic-resize-256to224+imagenet-norm")
+            if args.dino_ckpt:
+                h5.attrs.update(dino_ckpt=os.path.abspath(args.dino_ckpt))
         else:
             # 再開時: manifest と既存ファイルがずれていないか確認
             got = [s.decode() if isinstance(s, bytes) else s for s in h5["slide_id"][:]]
